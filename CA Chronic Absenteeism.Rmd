@@ -1,0 +1,390 @@
+---
+title: "CA Chronic Absenteeism"
+author: "Conor Kelly"
+date: "5/5/2019"
+output: html_document
+---
+
+This document presents analytic code for an evaluation of the Learning Communities for School Success (LCSS) grant program implemented by the California Department of Education. It uses three main sources of data from the CDE and proceeds in the following sections, which are set off by hash marks (########):
+
+- Read raw data from downloaded files
+- Clean and transform data to produce single analytic data frame
+- Analysis
+
+The main outputs from this code are linear and logit regression results (outputted as HTML tables through the 'stargazer' package) and descriptive results (outputted as text files).
+
+
+```{r}
+### load packages
+library(readr)
+library(dplyr)
+library(gmodels)
+library(stargazer)
+library(tidyverse)
+library(styler)
+
+###################################
+### read data
+###################################
+
+# chronic absenteeism
+absent17_raw <- read_tsv("//Users/conorkelly//Documents//Johns Hopkins//Methods of Policy Analytics//Data/ChrAbsRate1617.txt", col_types = cols(.default = "c"))
+absent18_raw <- read_tsv("//Users/conorkelly//Documents//Johns Hopkins//Methods of Policy Analytics//Data/ChrAbsRate1718.txt", col_types = cols(.default = "c"))
+
+# grantees
+grantees <- read_csv("//Users/conorkelly//Documents//Johns Hopkins//Methods of Policy Analytics//Data/CA absenteeism grantees 2017 - Sheet1.csv")
+
+# school and district characteristics
+race17_raw <- read_tsv("//Users/conorkelly//Documents//Johns Hopkins//Methods of Policy Analytics//Data/filesenr.17.txt", col_types = cols(.default = "c"))
+race18_raw <- read_tsv("//Users/conorkelly//Documents//Johns Hopkins//Methods of Policy Analytics//Data/filesenr.18.txt", col_types = cols(.default = "c"))
+
+
+#############################################
+### prepare data
+#############################################
+
+### clean student characteristics
+
+# race, want % Hispanic, % white, % black, % Asian
+race17 <- select(race17_raw, DISTRICT, ETHNIC, ENR_TOTAL)
+race18 <- select(race18_raw, DISTRICT, ETHNIC, ENR_TOTAL)
+
+# convert to numeric
+race17$ENR_TOTAL <- as.numeric(race17$ENR_TOTAL)
+race18$ENR_TOTAL <- as.numeric(race18$ENR_TOTAL)
+
+# percent black
+black17 <- subset(race17, race17$ETHNIC == "6")
+black17 <- within(black17, {enr_b = ave(ENR_TOTAL,DISTRICT, FUN = sum)} )
+black17 <- distinct(black17,DISTRICT, .keep_all = TRUE)
+black17 <- select(black17, DISTRICT, enr_b)
+
+black18 <- subset(race18, race18$ETHNIC == "6")
+black18 <- within(black18, {enr_b = ave(ENR_TOTAL,DISTRICT, FUN = sum)} )
+black18 <- distinct(black18,DISTRICT, .keep_all = TRUE)
+black18 <- select(black18, DISTRICT, enr_b)
+
+# percent hispanic
+hisp17 <- subset(race17, race17$ETHNIC == "5")
+hisp17 <- within(hisp17, {enr_hisp = ave(ENR_TOTAL,DISTRICT, FUN = sum)} )
+hisp17 <- distinct(hisp17,DISTRICT, .keep_all = TRUE)
+hisp17 <- select(hisp17, DISTRICT, enr_hisp)
+
+hisp18 <- subset(race18, race18$ETHNIC == "5")
+hisp18 <- within(hisp18, {enr_hisp = ave(ENR_TOTAL,DISTRICT, FUN = sum)} )
+hisp18 <- distinct(hisp18,DISTRICT, .keep_all = TRUE)
+hisp18 <- select(hisp18, DISTRICT, enr_hisp)
+
+# percent asian
+asian17 <- subset(race17, race17$ETHNIC == "2")
+asian17 <- within(asian17, {enr_asian = ave(ENR_TOTAL,DISTRICT, FUN = sum)} )
+asian17 <- distinct(asian17,DISTRICT, .keep_all = TRUE)
+asian17 <- select(asian17, DISTRICT, enr_asian)
+
+asian18 <- subset(race18, race18$ETHNIC == "2")
+asian18 <- within(asian18, {enr_asian = ave(ENR_TOTAL,DISTRICT, FUN = sum)} )
+asian18 <- distinct(asian18,DISTRICT, .keep_all = TRUE)
+asian18 <- select(asian18, DISTRICT, enr_asian)
+
+# percent white
+white17 <- subset(race17, race17$ETHNIC == "7")
+white17 <- within(white17, {enr_white = ave(ENR_TOTAL,DISTRICT, FUN = sum)} )
+white17 <- distinct(white17,DISTRICT, .keep_all = TRUE)
+white17 <- select(white17, DISTRICT, enr_white)
+
+white18 <- subset(race18, race18$ETHNIC == "7")
+white18 <- within(white18, {enr_white = ave(ENR_TOTAL,DISTRICT, FUN = sum)} )
+white18 <- distinct(white18,DISTRICT, .keep_all = TRUE)
+white18 <- select(white18, DISTRICT, enr_white)
+
+# combine into one file per year
+r1 <- merge(black17, hisp17, by.x='DISTRICT', by.y='DISTRICT', all = TRUE)
+r2 <- merge(r1, asian17, by.x='DISTRICT', by.y='DISTRICT', all = TRUE)
+race_dist_17 <- merge(r2, white17, by.x='DISTRICT', by.y='DISTRICT', all = TRUE)
+
+r1 <- merge(black18, hisp18, by.x='DISTRICT', by.y='DISTRICT', all = TRUE)
+r2 <- merge(r1, asian18, by.x='DISTRICT', by.y='DISTRICT', all = TRUE)
+race_dist_18 <- merge(r2, white18, by.x='DISTRICT', by.y='DISTRICT', all = TRUE)
+
+race_dist_all <- merge(race_dist_17, race_dist_18, by.x='DISTRICT', by.y='DISTRICT', all = TRUE)
+names(race_dist_all) <- c('distname', 'enr_b.17', 'enr_hisp.17', 'enr_asian.17', 'enr_white.17', 'enr_b.18', 'enr_hisp.18', 'enr_asian.18', 'enr_white.18')
+
+### clean grantees
+
+# column names
+names(grantees) <- c('countyname', 'distname', 'amount')
+
+# replace the dollar amounts
+grantees$amount = as.numeric(gsub("\\$", "", grantees$amount))
+
+# add treatment variable
+grantees$grant <- 1
+
+# for matching, fix district names
+grantees$distname <- gsub(" School District", "", grantees$distname)
+grantees$distname <- gsub(" Shool District", "", grantees$distname)
+grantees$distname <- gsub("Reef Sunset", "Reef-Sunset", grantees$distname)
+grantees$distname <- gsub("Red Bluff Joint Union High School", "Red Bluff Joint Union High", grantees$distname)
+grantees$distname <- gsub("Bernardino Unified", "Bernardino City Unified", grantees$distname)
+
+### clean and subset chronic absenteeism data
+absent17 <- absent17_raw
+abset18 <- absent18_raw
+
+# rename cols
+names(absent17) <- c('year', 'level', 'countycode', 'distcode', 'schoolcode', 'countyname', "distname", "schoolname", "charter", "category", "cum_enroll_17", "ca_count_17", "ca_rate_17")
+names(absent18) <- c('year', 'level', 'countycode', 'distcode', 'schoolcode', 'countyname', "distname", "schoolname", "charter", "category", "cum_enroll_18", "ca_cum_enroll_18", "ca_count_18", "ca_rate_18")
+
+# change to numeric vars
+absent17$cum_enroll_17 <- as.numeric(absent17$cum_enroll_17)
+absent18$cum_enroll_18 <- as.numeric(absent18$cum_enroll_18)
+absent17$ca_count_17 <- as.numeric(absent17$ca_count_17)
+absent18$ca_count_18 <- as.numeric(absent18$ca_count_18)
+absent17$ca_rate_17 <- as.numeric(absent17$ca_rate_17)
+absent18$ca_rate_18 <- as.numeric(absent18$ca_rate_18)
+absent18$ca_cum_enroll_18 <- as.numeric(absent18$ca_cum_enroll_18)
+
+# subset data for all students
+absent17_all <- filter(absent17, category == 'TA' & level == 'D1' & ca_rate_17 != "*")
+absent18_all <- filter(absent18, category == 'TA' & level == 'D1' & ca_rate_18 != "*")
+
+# subset data for 1-3
+absent17_13 <- filter(absent17, category == 'Grade 1-3' & level == 'D1' & ca_rate_17 != "*")
+absent18_13 <- filter(absent18, category == 'GR13' & level == 'D1' & ca_rate_18 != "*")
+
+# subset data for 4-6
+absent17_46 <- filter(absent17, category == 'Grade 4-6' & level == 'D1' & ca_rate_17 != "*")
+absent18_46 <- filter(absent18, category == 'GR46' & level == 'D1' & ca_rate_18 != "*")
+
+# subset data for 7-8
+absent17_78 <- filter(absent17, category == 'Grade 7-8' & level == 'D1' & ca_rate_17 != "*")
+absent18_78 <- filter(absent18, category == 'GR78' & level == 'D1' & ca_rate_18 != "*")
+
+# subset data for 9-12
+absent17_912 <- filter(absent17, category == 'Grade 9-12' & level == 'D1' & ca_rate_17 != "*")
+absent18_912 <- filter(absent18, category == 'GR912' & level == 'D1' & ca_rate_18 != "*")
+
+# merge all absence data into one dataframe
+
+# all grades
+absent_all <- merge(absent17_all, absent18_all, by.x="distcode", by.y="distcode", all = TRUE )
+absent_all$ca_rate_17_all <- absent_all$ca_rate_17
+absent_all$ca_rate_18_all <- absent_all$ca_rate_18
+absent_all <- select(absent_all, distcode, distname.x, countyname.x, category.x, ca_rate_17_all, ca_rate_18_all)
+
+# 1-3
+absent_13 <- merge(absent17_13, absent18_13, by.x="distcode", by.y="distcode", all = TRUE )
+absent_13$ca_rate_17_13 <- absent_13$ca_rate_17
+absent_13$ca_rate_18_13 <- absent_13$ca_rate_18
+absent_13 <- select(absent_13, distcode, distname.y, countyname.y, category.y, ca_rate_17_13, ca_rate_18_13)
+
+# 4-6
+absent_46 <- merge(absent17_46, absent18_46, by.x="distcode", by.y="distcode", all = TRUE )
+absent_46$ca_rate_17_46 <- absent_46$ca_rate_17
+absent_46$ca_rate_18_46 <- absent_46$ca_rate_18
+absent_46 <- select(absent_46, distcode, distname.y, countyname.y, category.y, ca_rate_17_46, ca_rate_18_46)
+
+# 7-8
+absent_78 <- merge(absent17_78, absent18_78, by.x="distcode", by.y="distcode", all = TRUE )
+absent_78$ca_rate_17_78 <- absent_78$ca_rate_17
+absent_78$ca_rate_18_78 <- absent_78$ca_rate_18
+absent_78 <- select(absent_78, distcode, distname.y, countyname.y, category.y, ca_rate_17_78, ca_rate_18_78)
+
+# 9-12
+absent_912 <- merge(absent17_912, absent18_912, by.x="distcode", by.y="distcode", all = TRUE )
+absent_912$ca_rate_17_912 <- absent_912$ca_rate_17
+absent_912$ca_rate_18_912 <- absent_912$ca_rate_18
+absent_912 <- select(absent_912, distcode, distname.y, countyname.y, category.y, ca_rate_17_912, ca_rate_18_912)
+
+# merge
+absent <- merge(absent_all, absent_13, by.x="distcode", by.y="distcode", all = TRUE )
+absent <- merge(absent, absent_46, by.x="distcode", by.y="distcode", all = TRUE )
+absent <- merge(absent, absent_78, by.x="distcode", by.y="distcode", all = TRUE )
+absent <- merge(absent, absent_912, by.x="distcode", by.y="distcode", all = TRUE )
+
+absent$distname <- absent$distname.x # for final merge
+
+# get total enrollment
+enr17 <- absent17_raw
+enr18 <- absent18_raw
+
+enr17 <- select(enr17, `District Name`, `Aggregate Level`, `Reporting Category`, `Cumulative Enrollment`)
+enr18 <- select(enr18, `DistrictName`, `AggregateLevel`, `ReportingCategory`, `CumulativeEnrollment`)
+
+names(enr17) <- c('distname', 'level', 'category', 'cum_enroll_17')
+names(enr18) <- c('distname', 'level', 'category', 'cum_enroll_18')
+  
+enr17 <- filter(enr17, category == 'TA' & level == 'D1' & cum_enroll_17 != "*")
+enr18 <- filter(enr18, category == 'TA' & level == 'D1' & cum_enroll_18 != "*")
+
+enr17 <- select(enr17, distname, cum_enroll_17)
+enr18 <- select(enr18, distname, cum_enroll_18)
+
+enr17$cum_enroll_17 <- as.numeric(enr17$cum_enroll_17)
+enr18$cum_enroll_18 <- as.numeric(enr18$cum_enroll_18)
+
+enr <- merge(enr17, enr18, by.x="distname", by.y='distname', all = TRUE)
+
+### merge all files
+ca <- merge(grantees, absent, by.x = "distname", by.y = "distname", all = TRUE )
+ca <- merge(ca, race_dist_all, by.x = "distname", by.y = "distname", all = TRUE )
+ca <- merge(ca, enr, by.x="distname", by.y='distname', all = TRUE)
+
+### clean final analytic file
+
+# missing values for treatment
+ca$grant <- ifelse(is.na(ca$grant), c(0), c(1))
+
+# select final vars
+ca <- select(ca, distname, distcode, grant, cum_enroll_17, cum_enroll_18, ca_rate_17_all, ca_rate_17_13, ca_rate_17_46, ca_rate_17_78, ca_rate_17_912, ca_rate_18_all, ca_rate_18_13, ca_rate_18_46, ca_rate_18_78, ca_rate_18_912, enr_b.17, enr_hisp.17, enr_asian.17, enr_white.17, enr_b.18, enr_hisp.18, enr_asian.18, enr_white.18)
+
+# outcome vars
+ca$ca_d_all <- ca$ca_rate_18_all - ca$ca_rate_17_all
+ca$ca_d_13 <- ca$ca_rate_18_13 - ca$ca_rate_17_13
+ca$ca_d_46 <- ca$ca_rate_18_46 - ca$ca_rate_17_46
+ca$ca_d_78 <- ca$ca_rate_18_78 - ca$ca_rate_17_78
+ca$ca_d_912 <- ca$ca_rate_18_912 - ca$ca_rate_17_912
+
+ca$decr_all <- ifelse(ca$ca_d_all < 0, c(1), c(0))
+ca$decr_13 <- ifelse(ca$ca_d_13 < 0, c(1), c(0))
+ca$decr_46 <- ifelse(ca$ca_d_46 < 0, c(1), c(0))
+ca$decr_78 <- ifelse(ca$ca_d_78 < 0, c(1), c(0))
+ca$decr_912 <- ifelse(ca$ca_d_912 < 0, c(1), c(0))
+
+# percent enrollment by race
+ca$p_black17 <- (ca$enr_b.17 / ca$cum_enroll_17)
+ca$p_hisp17 <- (ca$enr_hisp.17 / ca$cum_enroll_17)
+ca$p_asian17 <- (ca$enr_asian.17 / ca$cum_enroll_17)
+ca$p_white17 <- (ca$enr_white.17 / ca$cum_enroll_17)
+
+ca$p_black18 <- (ca$enr_b.18 / ca$cum_enroll_18)
+ca$p_hisp18 <- (ca$enr_hisp.18 / ca$cum_enroll_18)
+ca$p_asian18 <- (ca$enr_asian.18 / ca$cum_enroll_18)
+ca$p_white18 <- (ca$enr_white.18 / ca$cum_enroll_18)
+
+# check balance in general
+tapply(ca$ca_d_all, ca$grant, summary)
+tapply(ca$ca_d_13, ca$grant, summary)
+tapply(ca$ca_d_46, ca$grant, summary)
+tapply(ca$ca_d_78, ca$grant, summary)
+tapply(ca$ca_d_912, ca$grant, summary)
+
+# de-dup
+ca <- distinct(ca, distname, .keep_all = TRUE)
+
+# percent race
+ca$p_total_17 <- ca$p_hisp17 + ca$p_black17 + ca$p_white17 + ca$p_asian17
+ca$p_total_18 <- ca$p_hisp18 + ca$p_black18 + ca$p_white18 + ca$p_asian18
+
+# compare yoy
+ca$yeardiff <- ca$cum_enroll_18 / ca$cum_enroll_17
+
+# drop if districts are too small
+ca <- filter(ca, cum_enroll_18 > 500)
+ca <- filter(ca, cum_enroll_17 > 500)
+
+##########################################
+### analysis
+##########################################
+
+### descriptive
+
+mean(ca$ca_rate_17_all)
+
+summary(ca$ca_rate_17_all)
+
+# overall
+aggregate(ca$ca_d_all, by = list(ca$grant), mean, na.rm= TRUE)
+aggregate(ca$decr_all, by = list(ca$grant), mean, na.rm= TRUE)
+
+# 1-3
+aggregate(ca$ca_d_13, by = list(ca$grant), mean, na.rm= TRUE)
+aggregate(ca$decr_13, by = list(ca$grant), mean, na.rm= TRUE)
+
+# 4-6
+aggregate(ca$ca_d_46, by = list(ca$grant), mean, na.rm= TRUE)
+test <- aggregate(ca$decr_46, by = list(ca$grant), mean, na.rm= TRUE)
+
+# 7-8
+aggregate(ca$ca_d_78, by = list(ca$grant), mean, na.rm= TRUE)
+aggregate(ca$decr_78, by = list(ca$grant), mean, na.rm= TRUE)
+
+#9-12
+aggregate(ca$ca_d_912, by = list(ca$grant), mean, na.rm= TRUE)
+aggregate(ca$decr_912, by = list(ca$grant), mean, na.rm= TRUE)
+
+ca_nogrant <- filter(ca, grant == 0)
+ca_grant <- filter(ca, grant == 1)
+
+stargazer(ca_nogrant[c("ca_d_all", "ca_d_13","ca_d_46", "ca_d_78", "ca_d_912", "decr_all","decr_13","decr_46", "decr_78", "decr_912")], type = 'html', out = "desc_nogrant.txt")
+
+stargazer(ca_grant[c("ca_d_all", "ca_d_13","ca_d_46", "ca_d_78", "ca_d_912", "decr_all","decr_13","decr_46", "decr_78", "decr_912")], type = 'html', out = "desc_grant.txt")
+
+### linear models
+
+# model 1: overall chronic absenteeism rates
+model_all <- lm(ca_d_all ~ grant + cum_enroll_18 + cum_enroll_17 + p_black18 + p_black17 + p_hisp18 + p_hisp17 + p_asian18 + p_asian17 + p_white18 + p_white17, data = ca)
+
+summary(model_all)
+
+# model 2: Grade 1-3 chronic absenteeism rates
+model_13 <- lm(ca_d_13 ~ grant + cum_enroll_18 + cum_enroll_17 + p_black18 + p_black17 + p_hisp18 + p_hisp17 + p_asian18 + p_asian17 + p_white18 + p_white17, data = ca)
+
+summary(model_13)
+
+# model 3: Grade 4-6 chronic absenteeism rates
+model_46 <- lm(ca_d_46 ~ grant + cum_enroll_18 + cum_enroll_17 + p_black18 + p_black17 + p_hisp18 + p_hisp17 + p_asian18 + p_asian17 + p_white18 + p_white17, data = ca)
+
+summary(model_46)
+
+# model 4: Grade 7-8 chronic absenteeism rates
+model_78 <- lm(ca_d_78 ~ grant + cum_enroll_18 + cum_enroll_17 + p_black18 + p_black17 + p_hisp18 + p_hisp17 + p_asian18 + p_asian17 + p_white18 + p_white17, data = ca)
+
+summary(model_78)
+
+# model 5: Grade 9-12 chronic absenteeism rates
+model_912 <- lm(ca_d_912 ~ grant + cum_enroll_18 + cum_enroll_17 + p_black18 + p_black17 + p_hisp18 + p_hisp17 + p_asian18 + p_asian17 + p_white18 + p_white17, data = ca)
+
+summary(model_912)
+
+# results summary table
+
+lin_table <- stargazer(model_all, model_13, model_46, model_78, model_912, title="Impact of Grant Award on Year-Over-Year Change in Chronic Absenteeism Rates", type = 'html', single.row = TRUE, omit.stat=c("LL","ser","f"), ci.level=0.90, covariate.labels=c("Grant Award","2018 Enrollment", "2017 Enrollment","% Black (2018)", "% Black (2017)", "% Hispanic (2018)", "% Hispanic (2017)", "% Asian (2018)", "% Asian (2017)", "% White (2018)", "% White (2017)"), dep.var.labels=c("Overall","Grades 1-3", "Grades 4-6", "Grades 7-8", "Grades 9-12"))
+
+lin_table
+
+### logit models
+
+# logit 1: overall chronic absenteeism rates
+logit_all <- glm(decr_all ~ grant + cum_enroll_18 + cum_enroll_17 + p_black18 + p_black17 + p_hisp18 + p_hisp17 + p_asian18 + p_asian17 + p_white18 + p_white17, data = ca)
+
+summary(logit_all)
+
+# logit 2: Grade 1-3 chronic absenteeism rates
+logit_13 <- glm(decr_13 ~ grant + cum_enroll_18 + cum_enroll_17 + p_black18 + p_black17 + p_hisp18 + p_hisp17 + p_asian18 + p_asian17 + p_white18 + p_white17, data = ca)
+
+summary(logit_13)
+
+# logit 3: Grade 4-6 chronic absenteeism rates
+logit_46 <- glm(decr_46 ~ grant + cum_enroll_18 + cum_enroll_17 + p_black18 + p_black17 + p_hisp18 + p_hisp17 + p_asian18 + p_asian17 + p_white18 + p_white17, data = ca)
+
+summary(logit_46)
+
+# logit 4: Grade 7-8 chronic absenteeism rates
+logit_78 <- glm(decr_78 ~ grant + cum_enroll_18 + cum_enroll_17 + p_black18 + p_black17 + p_hisp18 + p_hisp17 + p_asian18 + p_asian17 + p_white18 + p_white17, data = ca)
+
+summary(logit_78)
+
+# logit 5: Grade 9-12 chronic absenteeism rates
+logit_912 <- glm(decr_912 ~ grant + cum_enroll_18 + cum_enroll_17 + p_black18 + p_black17 + p_hisp18 + p_hisp17 + p_asian18 + p_asian17 + p_white18 + p_white17, data = ca)
+
+summary(logit_912)
+
+### logit table
+
+logit_table <- stargazer(logit_all, logit_13, logit_46, logit_78, logit_912, title="Impact of Grant Award on Decrease in Chronic Absenteeism Rates", type = 'html', single.row = TRUE, omit.stat=c("LL","ser","f", "aic"), ci.level=0.90, covariate.labels=c("Grant Award","2018 Enrollment", "2017 Enrollment","% Black (2018)", "% Black (2017)", "% Hispanic (2018)", "% Hispanic (2017)", "% Asian (2018)", "% Asian (2017)", "% White (2018)", "% White (2017)"), dep.var.labels=c("Overall","Grades 1-3", "Grades 4-6", "Grades 7-8", "Grades 9-12"))
+
+logit_table
+
+```
+
